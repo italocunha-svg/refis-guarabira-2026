@@ -15,19 +15,18 @@ BASE_SERVIDORES = {
     "0021574": "JOSE ROBERTO BATISTA DOS SANTOS",
     "0023571": "LUCIANA ARRUDA PAULA DA FONSECA",
     "0021986": "LUZICLEIDE SERAFIM FELIX DE SOUSA",
-    "0000028": "WASHINGTON DE FREITAS SANTOS",
-    "123456": "SIMULADOR"
-
+    "0000028": "WASHINGTON DE FREITAS SANTOS"
 }
 
 # ==========================================
-# 1. MOTOR DE CÁLCULO DUPLO (MUNICIPAL VS STF)
+# 1. MOTOR DE CÁLCULO (LINHA DO TEMPO + TETO SELIC UNIVERSAL)
 # ==========================================
 class SistemaRefisGuarabira:
     def __init__(self, valor_ufr_pb: float):
         self.valor_ufr_pb = valor_ufr_pb
 
     def _obter_taxa_acumulada_bcb(self, codigo_sgs: int, data_vencimento: date, data_calculo: date) -> float:
+        """Busca taxas do BCB. 189=IGP-M, 433=IPCA, 4390=Selic"""
         if data_vencimento.month == 12:
             mes_ini = 1
             ano_ini = data_vencimento.year + 1
@@ -78,47 +77,87 @@ class SistemaRefisGuarabira:
             diferenca_meses = data_calculo.month - dt_venc.month
             meses_atraso = max(0, (diferenca_anos * 12) + diferenca_meses)
 
-            fator_igpm = self._obter_taxa_acumulada_bcb(189, dt_venc, data_calculo)
-            val_igpm = val_orig * fator_igpm
-            juros_mun = val_orig * (0.01 * meses_atraso)
-            encargos_mun = val_igpm + juros_mun
+            ano_venc = dt_venc.year
+            texto_comparativo = ""
+            texto_juros = ""
 
+            # Calcula o Teto Federal (Selic) - Agora aplicado para todos os anos
             fator_selic = self._obter_taxa_acumulada_bcb(4390, dt_venc, data_calculo)
             encargos_selic = val_orig * fator_selic
 
-            texto_comparativo = ""
+            # ==========================================
+            # REGRA 1: ATÉ 2023 (CTM ANTIGO)
+            # ==========================================
+            if ano_venc <= 2023:
+                fator_igpm = self._obter_taxa_acumulada_bcb(189, dt_venc, data_calculo)
+                val_corr_mun = val_orig * fator_igpm
+                juros_mun = val_orig * (0.01 * meses_atraso) # Juros nominais
+                val_multa = val_orig * 0.20 # Multa nominal
+                encargos_mun = val_corr_mun + juros_mun
+                nome_regra = "CTM Antigo: IGP-M + Juros"
+                nome_indice = "IGP-M"
+                
+            # ==========================================
+            # REGRA 2: A PARTIR DE 2024 (NOVA METODOLOGIA)
+            # ==========================================
+            else:
+                fator_ipca = self._obter_taxa_acumulada_bcb(433, dt_venc, data_calculo)
+                val_corr_mun = val_orig * fator_ipca
+                val_atualizado_mun = val_orig + val_corr_mun
+                
+                juros_mun = val_atualizado_mun * (0.01 * meses_atraso) # Juros em cascata
+                perc_multa = min(dias_atraso * 0.00033, 0.20)
+                val_multa = val_atualizado_mun * perc_multa # Multa em cascata
+                
+                encargos_mun = val_corr_mun + juros_mun
+                nome_regra = "Atual: IPCA + Juros"
+                nome_indice = "IPCA"
+
+            # ==========================================
+            # TRAVA DA SELIC E DISCRIMINAÇÃO DOS JUROS
+            # ==========================================
             if encargos_mun <= encargos_selic:
-                status_trava = "(Regra Municipal Aplicada: IGP-M + Juros)"
-                val_correcao = val_igpm
+                status_trava = f"(Regra {nome_regra})"
+                val_correcao = val_corr_mun
                 val_juros = juros_mun
+                
+                # Texto dinâmico: Regra Municipal venceu
+                if ano_venc <= 2023:
+                    texto_juros = f"Juros de Mora: R$ {val_juros:.2f} (1% a.m. sobre o Valor Original)"
+                else:
+                    texto_juros = f"Juros de Mora: R$ {val_juros:.2f} (1% a.m. sobre o Valor Atualizado)"
             else:
                 status_trava = "(Teto STF Aplicado: Limitado à Selic)"
-                val_correcao = min(val_igpm, encargos_selic)
+                val_correcao = min(val_corr_mun, encargos_selic)
                 val_juros = encargos_selic - val_correcao
                 
-                # INJEÇÃO DO TEXTO DESCARTADO SE O CHECKBOX ESTIVER MARCADO
+                # Texto dinâmico: Teto STF venceu
+                texto_juros = f"Juros de Mora: R$ {val_juros:.2f} (Fração complementar da Selic)"
+                
                 if mostrar_comparativo:
                     texto_comparativo = (
                         f"   >> [DESCARTADO PELO TETO STF]\n"
-                        f"   >> IGP-M CTM: R$ {val_igpm:.2f} | Juros CTM (1% a.m.): R$ {juros_mun:.2f}\n"
-                        f"   >> Soma CTM: R$ {encargos_mun:.2f} (Superou a Selic: R$ {encargos_selic:.2f})\n"
+                        f"   >> {nome_indice} Mun: R$ {val_corr_mun:.2f} | Juros Mun: R$ {juros_mun:.2f}\n"
+                        f"   >> Soma Mun: R$ {encargos_mun:.2f} (Superou a Selic: R$ {encargos_selic:.2f})\n"
                     )
 
-            val_multa = val_orig * 0.20
+            # Soma da linha
             total_deb = val_orig + val_correcao + val_multa + val_juros
 
+            # Consolidação
             total_orig += val_orig
             total_corr += val_correcao
             total_multa += val_multa
             total_juros += val_juros
             
+            # Impressão na Memória
             detalhamento_txt += f"--- {desc} (Venc: {dt_venc.strftime('%d/%m/%Y')}) ---\n"
             detalhamento_txt += f"Valor Original: R$ {val_orig:.2f}\n"
             if texto_comparativo:
                 detalhamento_txt += texto_comparativo
             detalhamento_txt += f"Correção Monetária: R$ {val_correcao:.2f} {status_trava}\n"
-            detalhamento_txt += f"Multa (20%): R$ {val_multa:.2f}\n"
-            detalhamento_txt += f"Juros de Mora: R$ {val_juros:.2f}\n"
+            detalhamento_txt += f"Multa (Metodologia {ano_venc}): R$ {val_multa:.2f}\n"
+            detalhamento_txt += f"{texto_juros}\n"
             detalhamento_txt += f"Subtotal do Débito: R$ {total_deb:.2f}\n\n"
 
         total_geral = total_orig + total_corr + total_multa + total_juros
@@ -126,6 +165,9 @@ class SistemaRefisGuarabira:
         if total_geral <= 0:
             raise ValueError("Nenhum débito válido para cálculo inserido.")
 
+        # ==========================================
+        # OPÇÕES DE PARCELAMENTO (REFIS 2026)
+        # ==========================================
         max_parcelas = 6 if total_geral <= 10000.00 else 10
         opcoes = []
         opcoes_memoria = ""
@@ -150,6 +192,7 @@ class SistemaRefisGuarabira:
                 })
                 opcoes_memoria += f"[{modalidade}] Parcela: R$ {val_parcela:.2f} | Total: R$ {total_pagar:.2f} | Descontos: {(desc_j*100):.0f}% Juros e {(desc_m*100):.0f}% Multa\n"
 
+        # Cabeçalho do Contribuinte
         cabecalho_contribuinte = ""
         if contribuinte or cnpj:
             cabecalho_contribuinte += "=========================================================\n"
@@ -220,14 +263,14 @@ def gerar_pdf(texto_memoria, nome_servidor, matricula):
 st.set_page_config(page_title="REFIS 2026 - Guarabira", layout="wide")
 
 st.title("🏛️ Simulador REFIS 2026 - Guarabira")
-st.markdown("Cálculo consolidado com adequação automática ao **Código Tributário** e ao **Teto Selic (STF Tema 1.217)**.")
+st.markdown("Cálculo consolidado com adequação automática ao **Código Tributário** e ao **Teto Selic Universal (STF Tema 1.217)**.")
 
 with st.sidebar:
     st.image("brasao_guarabira.jpg", use_container_width=True)
     st.header("⚙️ Configurações e Emissor")
     matricula_input = st.text_input("Matrícula do Servidor (Obrigatório)")
     dt_calc = st.date_input("Data do Acordo (Hoje)", date.today(), format="DD/MM/YYYY")
-    ufr_pb = st.number_input("Valor UFR-PB Atual (R$)", value=73.54)
+    ufr_pb = st.number_input("Valor UFR-PB Atual (R$)", value=65.00)
 
 st.subheader("👤 Dados do Contribuinte (Opcional)")
 col_nome, col_doc = st.columns(2)
@@ -241,7 +284,8 @@ st.info("💡 Preencha a descrição, valor e data. Clique no '+' abaixo da tabe
 
 if 'df_debitos' not in st.session_state:
     st.session_state.df_debitos = pd.DataFrame(
-        [{"Descrição": "Alvará 2023", "Valor Original (R$)": 1000.00, "Data de Vencimento": date(2023, 12, 10)}]
+        [{"Descrição": "Alvará 2023", "Valor Original (R$)": 1000.00, "Data de Vencimento": date(2023, 12, 10)},
+         {"Descrição": "Alvará 2024", "Valor Original (R$)": 1000.00, "Data de Vencimento": date(2024, 12, 10)}]
     )
 
 df_editado = st.data_editor(
@@ -281,7 +325,7 @@ if btn_calcular:
         else:
             try:
                 motor = SistemaRefisGuarabira(valor_ufr_pb=ufr_pb)
-                with st.spinner('Auditando CTM vs Teto STF (Selic e IGP-M)...'):
+                with st.spinner('Auditando CTM vs Teto STF Universal...'):
                     resultado = motor.processar_calculo_consolidado(lista_debitos, dt_calc, input_nome, input_doc, mostrar_comparativo)
                 
                 st.subheader("💳 2. Opções de Parcelamento (REFIS 2026)")
