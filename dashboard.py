@@ -288,15 +288,15 @@ st.info(
 st.subheader("📋 1. Informe os Débitos")
 st.markdown("💡 Preencha a descrição, valor e data. Clique no **'+'** abaixo da tabela para adicionar mais anos ou débitos.")
 
-if 'df_debitos' not in st.session_state:
-    st.session_state.df_debitos = pd.DataFrame(
+# ATENÇÃO: Mudamos a variável de memória para "df_debitos_novo" para limpar o cache automaticamente
+if 'df_debitos_novo' not in st.session_state:
+    st.session_state.df_debitos_novo = pd.DataFrame(
         [{"Descrição": "Alvará 2023", "Valor Original (R$)": 1000.00, "Data Vencimento": "10/12/2023"},
          {"Descrição": "Alvará 2024", "Valor Original (R$)": 1000.00, "Data Vencimento": "10/12/2024"}]
     )
 
-# Coluna de data atualizada para aceitar números diretos sem barra
 df_editado = st.data_editor(
-    st.session_state.df_debitos,
+    st.session_state.df_debitos_novo,
     num_rows="dynamic",
     column_config={
         "Descrição": st.column_config.TextColumn(help="Nome do débito (Ex: IPTU 2020)"),
