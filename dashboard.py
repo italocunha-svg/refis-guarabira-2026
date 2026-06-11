@@ -20,6 +20,38 @@ BASE_SERVIDORES = {
 }
 
 # ==========================================
+# CACHE INTELIGENTE DO BANCO CENTRAL COM ANTIBLOQUEIO
+# ==========================================
+@st.cache_data(ttl=86400, show_spinner=False)
+def obter_taxa_bcb_em_cache(codigo_sgs: int, mes_ini: int, ano_ini: int, data_calculo_str: str) -> float:
+    data_ini = date(ano_ini, mes_ini, 1)
+    dt_ini_str = data_ini.strftime("%d/%m/%Y")
+    
+    url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_sgs}/dados?formato=json&dataInicial={dt_ini_str}&dataFinal={data_calculo_str}"
+    
+    # O SEGREDO: O "crachá" que engana o firewall do Banco Central
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+    
+    try:
+        # Timeout reduzido para 5s. Se o BCB não responder rápido, aborta para não travar o painel.
+        resposta = requests.get(url, headers=headers, timeout=5)
+        resposta.raise_for_status()
+        dados = resposta.json()
+        if not dados: return 0.0
+        
+        fator_acumulado = 1.0
+        for mes in dados:
+            taxa_mensal = float(mes['valor']) / 100.0
+            fator_acumulado *= (1 + taxa_mensal)
+        return fator_acumulado - 1.0
+    except Exception as e:
+        # Agora o sistema vai te gritar na tela se o BCB sair do ar!
+        st.error(f"⚠️ Erro de comunicação com o Banco Central (Índice {codigo_sgs}). O site do governo pode estar fora do ar. Detalhes: {e}")
+        return 0.0
+
+# ==========================================
 # 1. MOTOR DE CÁLCULO (LINHA DO TEMPO + TETO SELIC UNIVERSAL)
 # ==========================================
 class SistemaRefisGuarabira:
@@ -27,7 +59,6 @@ class SistemaRefisGuarabira:
         self.valor_ufr_pb = valor_ufr_pb
 
     def _obter_taxa_acumulada_bcb(self, codigo_sgs: int, data_vencimento: date, data_calculo: date) -> float:
-        """Busca taxas do BCB. 189=IGP-M, 433=IPCA, 4390=Selic"""
         if data_vencimento.month == 12:
             mes_ini = 1
             ano_ini = data_vencimento.year + 1
@@ -38,23 +69,8 @@ class SistemaRefisGuarabira:
         data_ini = date(ano_ini, mes_ini, 1)
         if data_calculo < data_ini: return 0.0
 
-        dt_ini = data_ini.strftime("%d/%m/%Y")
-        dt_fim = data_calculo.strftime("%d/%m/%Y")
-        url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_sgs}/dados?formato=json&dataInicial={dt_ini}&dataFinal={dt_fim}"
-        
-        try:
-            resposta = requests.get(url, timeout=10)
-            resposta.raise_for_status()
-            dados = resposta.json()
-            if not dados: return 0.0
-            
-            fator_acumulado = 1.0
-            for mes in dados:
-                taxa_mensal = float(mes['valor']) / 100.0
-                fator_acumulado *= (1 + taxa_mensal)
-            return fator_acumulado - 1.0
-        except:
-            return 0.0 
+        data_calculo_str = data_calculo.strftime("%d/%m/%Y")
+        return obter_taxa_bcb_em_cache(codigo_sgs, mes_ini, ano_ini, data_calculo_str)
 
     def processar_calculo_consolidado(self, lista_debitos, data_calculo: date, contribuinte="", cnpj="", mostrar_comparativo=False):
         total_orig = 0.0
@@ -288,22 +304,21 @@ st.info(
 st.subheader("📋 1. Informe os Débitos")
 st.markdown("💡 Preencha a descrição, valor e data. Clique no **'+'** abaixo da tabela para adicionar mais anos ou débitos.")
 
-if 'df_debitos' not in st.session_state:
-    st.session_state.df_debitos = pd.DataFrame(
-        [{"Descrição": "Alvará 2023", "Valor Original (R$)": 1000.00, "Data Vencimento (DD/MM/AAAA)": "10/12/2023"},
-         {"Descrição": "Alvará 2024", "Valor Original (R$)": 1000.00, "Data Vencimento (DD/MM/AAAA)": "10/12/2024"}]
+if 'df_debitos_novo' not in st.session_state:
+    st.session_state.df_debitos_novo = pd.DataFrame(
+        [{"Descrição": "Alvará 2023", "Valor Original (R$)": 1000.00, "Data Vencimento": "10/12/2023"},
+         {"Descrição": "Alvará 2024", "Valor Original (R$)": 1000.00, "Data Vencimento": "10/12/2024"}]
     )
 
-# A MUDANÇA DA DATA ESTÁ AQUI: Trocamos o DateColumn (bugado nos navegadores) por TextColumn com regex
 df_editado = st.data_editor(
-    st.session_state.df_debitos,
+    st.session_state.df_debitos_novo,
     num_rows="dynamic",
     column_config={
         "Descrição": st.column_config.TextColumn(help="Nome do débito (Ex: IPTU 2020)"),
         "Valor Original (R$)": st.column_config.NumberColumn(format="%.2f", min_value=0.01),
-        "Data Vencimento (DD/MM/AAAA)": st.column_config.TextColumn(
-            help="Digite exatamente no formato DD/MM/AAAA (ex: 31/12/2023)",
-            validate=r"^(0[1-9]|[12][0-9]|3[01])/(0[1-9]|1[012])/(19|20)\d\d$"
+        "Data Vencimento": st.column_config.TextColumn(
+            help="Pode digitar com ou sem barras. (Ex: 31/12/2023 ou 31122023)",
+            validate=r"^(0[1-9]|[12][0-9]|3[01])[/\-\.]?(0[1-9]|1[012])[/\-\.]?(19|20)\d\d$"
         )
     },
     use_container_width=True
@@ -323,14 +338,15 @@ if btn_calcular:
         for index, row in df_editado.iterrows():
             desc = row.get('Descrição')
             val = row.get('Valor Original (R$)')
-            dt_str = row.get('Data Vencimento (DD/MM/AAAA)')
+            dt_str = row.get('Data Vencimento')
             
             if pd.notna(val) and pd.notna(dt_str) and str(dt_str).strip() != "":
-                # Convertendo a string digitada de volta para Data Oficial do Python
+                dt_str_clean = str(dt_str).strip().replace("/", "").replace("-", "").replace(".", "")
+                
                 try:
-                    dt = datetime.strptime(str(dt_str).strip(), "%d/%m/%Y").date()
+                    dt = datetime.strptime(dt_str_clean, "%d%m%Y").date()
                 except ValueError:
-                    st.error(f"❌ Erro na data do débito '{desc}'. Certifique-se de digitar uma data real no formato DD/MM/AAAA.")
+                    st.error(f"❌ Erro na data do débito '{desc}'. Certifique-se de digitar uma data válida (ex: 31122023 ou 31/12/2023).")
                     erro_data = True
                     break
                 
