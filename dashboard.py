@@ -288,22 +288,22 @@ st.info(
 st.subheader("📋 1. Informe os Débitos")
 st.markdown("💡 Preencha a descrição, valor e data. Clique no **'+'** abaixo da tabela para adicionar mais anos ou débitos.")
 
-# ATENÇÃO: Mudamos a variável de memória para "df_debitos_novo" para limpar o cache automaticamente
-if 'df_debitos_novo' not in st.session_state:
-    st.session_state.df_debitos_novo = pd.DataFrame(
-        [{"Descrição": "Alvará 2023", "Valor Original (R$)": 1000.00, "Data Vencimento": "10/12/2023"},
-         {"Descrição": "Alvará 2024", "Valor Original (R$)": 1000.00, "Data Vencimento": "10/12/2024"}]
+if 'df_debitos' not in st.session_state:
+    st.session_state.df_debitos = pd.DataFrame(
+        [{"Descrição": "Alvará 2023", "Valor Original (R$)": 1000.00, "Data Vencimento (DD/MM/AAAA)": "10/12/2023"},
+         {"Descrição": "Alvará 2024", "Valor Original (R$)": 1000.00, "Data Vencimento (DD/MM/AAAA)": "10/12/2024"}]
     )
 
+# A MUDANÇA DA DATA ESTÁ AQUI: Trocamos o DateColumn (bugado nos navegadores) por TextColumn com regex
 df_editado = st.data_editor(
-    st.session_state.df_debitos_novo,
+    st.session_state.df_debitos,
     num_rows="dynamic",
     column_config={
         "Descrição": st.column_config.TextColumn(help="Nome do débito (Ex: IPTU 2020)"),
         "Valor Original (R$)": st.column_config.NumberColumn(format="%.2f", min_value=0.01),
-        "Data Vencimento": st.column_config.TextColumn(
-            help="Pode digitar com ou sem barras. (Ex: 31/12/2023 ou 31122023)",
-            validate=r"^(0[1-9]|[12][0-9]|3[01])[/\-\.]?(0[1-9]|1[012])[/\-\.]?(19|20)\d\d$"
+        "Data Vencimento (DD/MM/AAAA)": st.column_config.TextColumn(
+            help="Digite exatamente no formato DD/MM/AAAA (ex: 31/12/2023)",
+            validate=r"^(0[1-9]|[12][0-9]|3[01])/(0[1-9]|1[012])/(19|20)\d\d$"
         )
     },
     use_container_width=True
@@ -323,17 +323,14 @@ if btn_calcular:
         for index, row in df_editado.iterrows():
             desc = row.get('Descrição')
             val = row.get('Valor Original (R$)')
-            dt_str = row.get('Data Vencimento')
+            dt_str = row.get('Data Vencimento (DD/MM/AAAA)')
             
             if pd.notna(val) and pd.notna(dt_str) and str(dt_str).strip() != "":
-                # Limpa qualquer barra, ponto ou traço que o usuário possa ter digitado (ou não)
-                dt_str_clean = str(dt_str).strip().replace("/", "").replace("-", "").replace(".", "")
-                
+                # Convertendo a string digitada de volta para Data Oficial do Python
                 try:
-                    # Converte os 8 números limpos para o formato real de data
-                    dt = datetime.strptime(dt_str_clean, "%d%m%Y").date()
+                    dt = datetime.strptime(str(dt_str).strip(), "%d/%m/%Y").date()
                 except ValueError:
-                    st.error(f"❌ Erro na data do débito '{desc}'. Certifique-se de digitar uma data válida (ex: 31122023 ou 31/12/2023).")
+                    st.error(f"❌ Erro na data do débito '{desc}'. Certifique-se de digitar uma data real no formato DD/MM/AAAA.")
                     erro_data = True
                     break
                 
