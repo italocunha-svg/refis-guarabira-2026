@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import date
+from datetime import date, datetime
 from fpdf import FPDF
 
 # ==========================================
@@ -81,7 +81,7 @@ class SistemaRefisGuarabira:
             texto_comparativo = ""
             texto_juros = ""
 
-            # Calcula o Teto Federal (Selic) - Agora aplicado para todos os anos
+            # Calcula o Teto Federal (Selic)
             fator_selic = self._obter_taxa_acumulada_bcb(4390, dt_venc, data_calculo)
             encargos_selic = val_orig * fator_selic
 
@@ -91,8 +91,8 @@ class SistemaRefisGuarabira:
             if ano_venc <= 2023:
                 fator_igpm = self._obter_taxa_acumulada_bcb(189, dt_venc, data_calculo)
                 val_corr_mun = val_orig * fator_igpm
-                juros_mun = val_orig * (0.01 * meses_atraso) # Juros nominais
-                val_multa = val_orig * 0.20 # Multa nominal
+                juros_mun = val_orig * (0.01 * meses_atraso)
+                val_multa = val_orig * 0.20 
                 encargos_mun = val_corr_mun + juros_mun
                 nome_regra = "CTM Antigo: IGP-M + Juros"
                 nome_indice = "IGP-M"
@@ -105,10 +105,9 @@ class SistemaRefisGuarabira:
                 val_corr_mun = val_orig * fator_ipca
                 val_atualizado_mun = val_orig + val_corr_mun
                 
-                juros_mun = val_atualizado_mun * (0.01 * meses_atraso) # Juros em cascata
+                juros_mun = val_atualizado_mun * (0.01 * meses_atraso) 
                 perc_multa = min(dias_atraso * 0.00033, 0.20)
-                val_multa = val_atualizado_mun * perc_multa # Multa em cascata
-                
+                val_multa = val_atualizado_mun * perc_multa 
                 encargos_mun = val_corr_mun + juros_mun
                 nome_regra = "Atual: IPCA + Juros"
                 nome_indice = "IPCA"
@@ -121,7 +120,6 @@ class SistemaRefisGuarabira:
                 val_correcao = val_corr_mun
                 val_juros = juros_mun
                 
-                # Texto dinâmico: Regra Municipal venceu
                 if ano_venc <= 2023:
                     texto_juros = f"Juros de Mora: R$ {val_juros:.2f} (1% a.m. sobre o Valor Original)"
                 else:
@@ -131,7 +129,6 @@ class SistemaRefisGuarabira:
                 val_correcao = min(val_corr_mun, encargos_selic)
                 val_juros = encargos_selic - val_correcao
                 
-                # Texto dinâmico: Teto STF venceu
                 texto_juros = f"Juros de Mora: R$ {val_juros:.2f} (Fração complementar da Selic)"
                 
                 if mostrar_comparativo:
@@ -279,22 +276,34 @@ with col_nome:
 with col_doc:
     input_doc = st.text_input("CPF / CNPJ")
 
+# === QUADRO INFORMATIVO (DICA UFR-PB) ===
+st.info(
+    "💡 **DICA RÁPIDA - CONVERSÃO DE ALVARÁ (UFR-PB)**\n\n"
+    "Ao inserir os valores na tabela abaixo, utilize as seguintes cotações:\n"
+    "* Para valores de **Janeiro de 2024**: Multiplique a quantidade de UFR-PB da tabela por **R$ 65,21**\n"
+    "* Para valores de **Janeiro de 2025**: Multiplique a quantidade de UFR-PB da tabela por **R$ 68,38**"
+)
+
 st.subheader("📋 1. Informe os Débitos")
-st.info("💡 Preencha a descrição, valor e data. Clique no '+' abaixo da tabela para adicionar mais anos ou débitos.")
+st.markdown("💡 Preencha a descrição, valor e data. Clique no **'+'** abaixo da tabela para adicionar mais anos ou débitos.")
 
 if 'df_debitos' not in st.session_state:
     st.session_state.df_debitos = pd.DataFrame(
-        [{"Descrição": "Alvará 2023", "Valor Original (R$)": 1000.00, "Data de Vencimento": date(2023, 12, 10)},
-         {"Descrição": "Alvará 2024", "Valor Original (R$)": 1000.00, "Data de Vencimento": date(2024, 12, 10)}]
+        [{"Descrição": "Alvará 2023", "Valor Original (R$)": 1000.00, "Data Vencimento (DD/MM/AAAA)": "10/12/2023"},
+         {"Descrição": "Alvará 2024", "Valor Original (R$)": 1000.00, "Data Vencimento (DD/MM/AAAA)": "10/12/2024"}]
     )
 
+# A MUDANÇA DA DATA ESTÁ AQUI: Trocamos o DateColumn (bugado nos navegadores) por TextColumn com regex
 df_editado = st.data_editor(
     st.session_state.df_debitos,
     num_rows="dynamic",
     column_config={
         "Descrição": st.column_config.TextColumn(help="Nome do débito (Ex: IPTU 2020)"),
         "Valor Original (R$)": st.column_config.NumberColumn(format="%.2f", min_value=0.01),
-        "Data de Vencimento": st.column_config.DateColumn(format="DD/MM/YYYY")
+        "Data Vencimento (DD/MM/AAAA)": st.column_config.TextColumn(
+            help="Digite exatamente no formato DD/MM/AAAA (ex: 31/12/2023)",
+            validate=r"^(0[1-9]|[12][0-9]|3[01])/(0[1-9]|1[012])/(19|20)\d\d$"
+        )
     },
     use_container_width=True
 )
@@ -308,51 +317,61 @@ if btn_calcular:
         st.error("⚠️ Atenção: A matrícula do servidor no menu lateral é obrigatória para emissão.")
     else:
         lista_debitos = []
+        erro_data = False
+        
         for index, row in df_editado.iterrows():
             desc = row.get('Descrição')
             val = row.get('Valor Original (R$)')
-            dt = row.get('Data de Vencimento')
+            dt_str = row.get('Data Vencimento (DD/MM/AAAA)')
             
-            if pd.notna(val) and pd.notna(dt):
-                if isinstance(dt, pd.Timestamp):
-                    dt = dt.date()
+            if pd.notna(val) and pd.notna(dt_str) and str(dt_str).strip() != "":
+                # Convertendo a string digitada de volta para Data Oficial do Python
+                try:
+                    dt = datetime.strptime(str(dt_str).strip(), "%d/%m/%Y").date()
+                except ValueError:
+                    st.error(f"❌ Erro na data do débito '{desc}'. Certifique-se de digitar uma data real no formato DD/MM/AAAA.")
+                    erro_data = True
+                    break
+                
                 if pd.isna(desc) or str(desc).strip() == "":
                     desc = f"Débito {index + 1}"
+                    
                 lista_debitos.append({'descricao': str(desc), 'valor': float(val), 'vencimento': dt})
 
-        if not lista_debitos:
-            st.error("Por favor, preencha ao menos um débito na tabela acima.")
-        else:
-            try:
-                motor = SistemaRefisGuarabira(valor_ufr_pb=ufr_pb)
-                with st.spinner('Auditando CTM vs Teto STF Universal...'):
-                    resultado = motor.processar_calculo_consolidado(lista_debitos, dt_calc, input_nome, input_doc, mostrar_comparativo)
-                
-                st.subheader("💳 2. Opções de Parcelamento (REFIS 2026)")
-                if resultado['opcoes']:
-                    df_resumo = pd.DataFrame(resultado['opcoes'])
-                    st.dataframe(df_resumo, use_container_width=True, hide_index=True)
+        if not erro_data:
+            if not lista_debitos:
+                st.error("Por favor, preencha ao menos um débito na tabela acima.")
+            else:
+                try:
+                    motor = SistemaRefisGuarabira(valor_ufr_pb=ufr_pb)
+                    with st.spinner('Auditando CTM vs Teto STF Universal...'):
+                        resultado = motor.processar_calculo_consolidado(lista_debitos, dt_calc, input_nome, input_doc, mostrar_comparativo)
                     
-                    st.divider()
-                    st.subheader("📊 3. Memória de Cálculo Oficial")
-                    st.code(resultado['memoria_txt'], language='text')
-                    
-                    if matricula_input in BASE_SERVIDORES:
-                        nome_do_atendente = BASE_SERVIDORES[matricula_input]
+                    st.subheader("💳 2. Opções de Parcelamento (REFIS 2026)")
+                    if resultado['opcoes']:
+                        df_resumo = pd.DataFrame(resultado['opcoes'])
+                        st.dataframe(df_resumo, use_container_width=True, hide_index=True)
+                        
+                        st.divider()
+                        st.subheader("📊 3. Memória de Cálculo Oficial")
+                        st.code(resultado['memoria_txt'], language='text')
+                        
+                        if matricula_input in BASE_SERVIDORES:
+                            nome_do_atendente = BASE_SERVIDORES[matricula_input]
+                        else:
+                            nome_do_atendente = "SERVIDOR NÃO LOCALIZADO"
+
+                        pdf_bytes = gerar_pdf(resultado['memoria_txt'], nome_do_atendente, matricula_input)
+                        
+                        st.download_button(
+                            label="⬇️ Baixar Documento Oficial em PDF",
+                            data=pdf_bytes,
+                            file_name=f"Termo_Consolidado_Refis_{dt_calc.strftime('%Y%m%d')}.pdf",
+                            mime="application/pdf",
+                            type="primary"
+                        )
                     else:
-                        nome_do_atendente = "SERVIDOR NÃO LOCALIZADO"
+                        st.error("Nenhuma opção válida encontrada. O valor da parcela ficaria inferior a 1 UFR-PB.")
 
-                    pdf_bytes = gerar_pdf(resultado['memoria_txt'], nome_do_atendente, matricula_input)
-                    
-                    st.download_button(
-                        label="⬇️ Baixar Documento Oficial em PDF",
-                        data=pdf_bytes,
-                        file_name=f"Termo_Consolidado_Refis_{dt_calc.strftime('%Y%m%d')}.pdf",
-                        mime="application/pdf",
-                        type="primary"
-                    )
-                else:
-                    st.error("Nenhuma opção válida encontrada. O valor da parcela ficaria inferior a 1 UFR-PB.")
-
-            except ValueError as e:
-                st.warning(str(e))
+                except ValueError as e:
+                    st.warning(str(e))
