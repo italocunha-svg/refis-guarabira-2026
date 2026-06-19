@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
+import time  # <--- NOVA BIBLIOTECA ADICIONADA PARA O "MOTOR DE INSISTÊNCIA"
 from datetime import date, datetime
 from fpdf import FPDF
 
@@ -15,12 +16,11 @@ BASE_SERVIDORES = {
     "0021574": "JOSE ROBERTO BATISTA DOS SANTOS",
     "0023571": "LUCIANA ARRUDA PAULA DA FONSECA",
     "0021986": "LUZICLEIDE SERAFIM FELIX DE SOUSA",
-    "0000028": "WASHINGTON DE FREITAS SANTOS",
-    "123456": "SIMULADOR"
+    "0000028": "WASHINGTON DE FREITAS SANTOS"
 }
 
 # ==========================================
-# CACHE INTELIGENTE DO BANCO CENTRAL COM ANTIBLOQUEIO
+# CACHE INTELIGENTE DO BANCO CENTRAL (COM MOTOR DE INSISTÊNCIA)
 # ==========================================
 @st.cache_data(ttl=86400, show_spinner=False)
 def obter_taxa_bcb_em_cache(codigo_sgs: int, mes_ini: int, ano_ini: int, data_calculo_str: str) -> float:
@@ -29,27 +29,36 @@ def obter_taxa_bcb_em_cache(codigo_sgs: int, mes_ini: int, ano_ini: int, data_ca
     
     url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_sgs}/dados?formato=json&dataInicial={dt_ini_str}&dataFinal={data_calculo_str}"
     
-    # O SEGREDO: O "crachá" que engana o firewall do Banco Central
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
     
-    try:
-        # Timeout reduzido para 5s. Se o BCB não responder rápido, aborta para não travar o painel.
-        resposta = requests.get(url, headers=headers, timeout=5)
-        resposta.raise_for_status()
-        dados = resposta.json()
-        if not dados: return 0.0
-        
-        fator_acumulado = 1.0
-        for mes in dados:
-            taxa_mensal = float(mes['valor']) / 100.0
-            fator_acumulado *= (1 + taxa_mensal)
-        return fator_acumulado - 1.0
-    except Exception as e:
-        # Agora o sistema vai te gritar na tela se o BCB sair do ar!
-        st.error(f"⚠️ Erro de comunicação com o Banco Central (Índice {codigo_sgs}). O site do governo pode estar fora do ar. Detalhes: {e}")
-        return 0.0
+    # Motor de insistência: Tenta até 3 vezes conectar ao Banco Central
+    for tentativa in range(3):
+        try:
+            # Aumentamos o limite de espera para 15 segundos
+            resposta = requests.get(url, headers=headers, timeout=15)
+            resposta.raise_for_status()
+            dados = resposta.json()
+            if not dados: return 0.0
+            
+            fator_acumulado = 1.0
+            for mes in dados:
+                taxa_mensal = float(mes['valor']) / 100.0
+                fator_acumulado *= (1 + taxa_mensal)
+            return fator_acumulado - 1.0
+            
+        except requests.exceptions.Timeout:
+            if tentativa == 2: # Se for a última tentativa (índice 2), ele avisa o erro
+                st.error(f"⚠️ O servidor do Banco Central (Índice {codigo_sgs}) está muito lento hoje e não respondeu após várias tentativas. Tente novamente em alguns instantes.")
+                return 0.0
+            time.sleep(2) # Espera 2 segundos antes de "bater na porta" do governo de novo
+            
+        except Exception as e:
+            st.error(f"⚠️ Erro de comunicação com o Banco Central (Índice {codigo_sgs}). O site do governo pode estar fora do ar. Detalhes: {e}")
+            return 0.0
+            
+    return 0.0
 
 # ==========================================
 # 1. MOTOR DE CÁLCULO (LINHA DO TEMPO + TETO SELIC UNIVERSAL)
@@ -284,7 +293,7 @@ with st.sidebar:
     st.header("⚙️ Configurações e Emissor")
     matricula_input = st.text_input("Matrícula do Servidor (Obrigatório)")
     dt_calc = st.date_input("Data do Acordo (Hoje)", date.today(), format="DD/MM/YYYY")
-    ufr_pb = st.number_input("Valor UFR-PB Atual (R$)", value=73.54)
+    ufr_pb = st.number_input("Valor UFR-PB Atual (R$)", value=65.00)
 
 st.subheader("👤 Dados do Contribuinte (Opcional)")
 col_nome, col_doc = st.columns(2)
