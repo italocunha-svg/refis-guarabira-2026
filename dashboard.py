@@ -293,7 +293,7 @@ with st.sidebar:
     st.header("⚙️ Configurações e Emissor")
     matricula_input = st.text_input("Matrícula do Servidor (Obrigatório)")
     dt_calc = st.date_input("Data do Acordo (Hoje)", date.today(), format="DD/MM/YYYY")
-    ufr_pb = st.number_input("Valor UFR-PB Atual (R$)", value=73.54)
+    ufr_pb = st.number_input("Valor UFR-PB Atual (R$)", value=73.96)
 
 st.subheader("👤 Dados do Contribuinte (Opcional)")
 col_nome, col_doc = st.columns(2)
