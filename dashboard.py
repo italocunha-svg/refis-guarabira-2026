@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
-import time  # <--- NOVA BIBLIOTECA ADICIONADA PARA O "MOTOR DE INSISTÊNCIA"
+import time
 from datetime import date, datetime
 from fpdf import FPDF
 
@@ -16,47 +16,71 @@ BASE_SERVIDORES = {
     "0021574": "JOSE ROBERTO BATISTA DOS SANTOS",
     "0023571": "LUCIANA ARRUDA PAULA DA FONSECA",
     "0021986": "LUZICLEIDE SERAFIM FELIX DE SOUSA",
-    "0000028": "WASHINGTON DE FREITAS SANTOS"
+    "0000028": "WASHINGTON DE FREITAS SANTOS",
+    "123456": "DEMONSTRAÇÃO"
 }
 
 # ==========================================
-# CACHE INTELIGENTE DO BANCO CENTRAL (COM MOTOR DE INSISTÊNCIA)
+# CACHE INTELIGENTE DO BANCO CENTRAL (COM PLANO C ANTIFALHAS)
 # ==========================================
 @st.cache_data(ttl=86400, show_spinner=False)
 def obter_taxa_bcb_em_cache(codigo_sgs: int, mes_ini: int, ano_ini: int, data_calculo_str: str) -> float:
     data_ini = date(ano_ini, mes_ini, 1)
     dt_ini_str = data_ini.strftime("%d/%m/%Y")
     
-    url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_sgs}/dados?formato=json&dataInicial={dt_ini_str}&dataFinal={data_calculo_str}"
-    
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
     }
     
-    # Motor de insistência: Tenta até 3 vezes conectar ao Banco Central
-    for tentativa in range(3):
+    # Plano A: Data exata
+    url_a = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_sgs}/dados?formato=json&dataInicial={dt_ini_str}&dataFinal={data_calculo_str}"
+    
+    # Plano B: Desde 1º de Janeiro do ano inicial
+    url_b = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_sgs}/dados?formato=json&dataInicial=01/01/{ano_ini}&dataFinal={data_calculo_str}"
+    
+    # Plano C (Infalível): Sem data final. O BCB não engasga porque não precisa processar o limite de tempo.
+    url_c = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_sgs}/dados?formato=json&dataInicial=01/01/{ano_ini}"
+    
+    urls_para_tentar = [url_a, url_b, url_c, url_c, url_c]
+    
+    # Usando Session() ajuda a evitar o erro "IncompleteRead" (cortes abruptos do BCB)
+    session = requests.Session()
+    
+    for tentativa, url in enumerate(urls_para_tentar):
         try:
-            # Aumentamos o limite de espera para 15 segundos
-            resposta = requests.get(url, headers=headers, timeout=15)
+            resposta = session.get(url, headers=headers, timeout=15)
             resposta.raise_for_status()
             dados = resposta.json()
-            if not dados: return 0.0
+            
+            if not dados: 
+                if tentativa == len(urls_para_tentar) - 1: return 0.0
+                time.sleep(1)
+                continue
             
             fator_acumulado = 1.0
-            for mes in dados:
-                taxa_mensal = float(mes['valor']) / 100.0
-                fator_acumulado *= (1 + taxa_mensal)
+            data_calc_obj = datetime.strptime(data_calculo_str, "%d/%m/%Y").date()
+            
+            # Filtro interno do Python: se vier dado a mais (por causa do Plano B ou C), o Python descarta o excesso.
+            for item in dados:
+                data_item = datetime.strptime(item['data'], "%d/%m/%Y").date()
+                if data_ini <= data_item <= data_calc_obj:
+                    taxa_mensal = float(item['valor']) / 100.0
+                    fator_acumulado *= (1 + taxa_mensal)
+                    
             return fator_acumulado - 1.0
             
         except requests.exceptions.Timeout:
-            if tentativa == 2: # Se for a última tentativa (índice 2), ele avisa o erro
-                st.error(f"⚠️ O servidor do Banco Central (Índice {codigo_sgs}) está muito lento hoje e não respondeu após várias tentativas. Tente novamente em alguns instantes.")
+            if tentativa == len(urls_para_tentar) - 1:
+                st.error(f"⚠️ O servidor do Banco Central (Índice {codigo_sgs}) não respondeu a tempo.")
                 return 0.0
-            time.sleep(2) # Espera 2 segundos antes de "bater na porta" do governo de novo
+            time.sleep(2)
             
         except Exception as e:
-            st.error(f"⚠️ Erro de comunicação com o Banco Central (Índice {codigo_sgs}). O site do governo pode estar fora do ar. Detalhes: {e}")
-            return 0.0
+            if tentativa == len(urls_para_tentar) - 1:
+                st.error(f"⚠️ Erro de comunicação com o Banco Central (Índice {codigo_sgs}). Detalhes: {e}")
+                return 0.0
+            time.sleep(2)
             
     return 0.0
 
@@ -293,7 +317,7 @@ with st.sidebar:
     st.header("⚙️ Configurações e Emissor")
     matricula_input = st.text_input("Matrícula do Servidor (Obrigatório)")
     dt_calc = st.date_input("Data do Acordo (Hoje)", date.today(), format="DD/MM/YYYY")
-    ufr_pb = st.number_input("Valor UFR-PB Atual (R$)", value=74.08)
+    ufr_pb = st.number_input("Valor UFR-PB Atual (R$)", value=74.13)
 
 st.subheader("👤 Dados do Contribuinte (Opcional)")
 col_nome, col_doc = st.columns(2)
@@ -302,7 +326,6 @@ with col_nome:
 with col_doc:
     input_doc = st.text_input("CPF / CNPJ")
 
-# === QUADRO INFORMATIVO (DICA UFR-PB) ===
 st.info(
     "💡 **DICA RÁPIDA - CONVERSÃO DE ALVARÁ (UFR-PB)**\n\n"
     "Ao inserir os valores na tabela abaixo, utilize as seguintes cotações:\n"
