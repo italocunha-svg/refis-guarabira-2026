@@ -6,6 +6,12 @@ from datetime import date, datetime
 from fpdf import FPDF
 
 # ==========================================
+# CONFIGURAÇÃO GLOBAL DO SISTEMA
+# ==========================================
+# Altere para False quando o prazo do REFIS acabar.
+REFIS_ATIVO = False 
+
+# ==========================================
 # BASE DE DADOS DOS SERVIDORES
 # ==========================================
 BASE_SERVIDORES = {
@@ -17,11 +23,11 @@ BASE_SERVIDORES = {
     "0023571": "LUCIANA ARRUDA PAULA DA FONSECA",
     "0021986": "LUZICLEIDE SERAFIM FELIX DE SOUSA",
     "0000028": "WASHINGTON DE FREITAS SANTOS",
-    "123456": "DEMONSTRAÇÃO"
+    "123456": "Simulador"
 }
 
 # ==========================================
-# CACHE INTELIGENTE DO BANCO CENTRAL (COM PLANO C ANTIFALHAS)
+# CACHE INTELIGENTE DO BANCO CENTRAL (PLANO C ANTIFALHAS)
 # ==========================================
 @st.cache_data(ttl=86400, show_spinner=False)
 def obter_taxa_bcb_em_cache(codigo_sgs: int, mes_ini: int, ano_ini: int, data_calculo_str: str) -> float:
@@ -33,18 +39,11 @@ def obter_taxa_bcb_em_cache(codigo_sgs: int, mes_ini: int, ano_ini: int, data_ca
         "Accept": "application/json"
     }
     
-    # Plano A: Data exata
     url_a = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_sgs}/dados?formato=json&dataInicial={dt_ini_str}&dataFinal={data_calculo_str}"
-    
-    # Plano B: Desde 1º de Janeiro do ano inicial
     url_b = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_sgs}/dados?formato=json&dataInicial=01/01/{ano_ini}&dataFinal={data_calculo_str}"
-    
-    # Plano C (Infalível): Sem data final. O BCB não engasga porque não precisa processar o limite de tempo.
     url_c = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_sgs}/dados?formato=json&dataInicial=01/01/{ano_ini}"
     
-    urls_para_tentar = [url_a, url_b, url_c, url_c, url_c]
-    
-    # Usando Session() ajuda a evitar o erro "IncompleteRead" (cortes abruptos do BCB)
+    urls_para_tentar = [url_a, url_b, url_c, url_c]
     session = requests.Session()
     
     for tentativa, url in enumerate(urls_para_tentar):
@@ -61,7 +60,6 @@ def obter_taxa_bcb_em_cache(codigo_sgs: int, mes_ini: int, ano_ini: int, data_ca
             fator_acumulado = 1.0
             data_calc_obj = datetime.strptime(data_calculo_str, "%d/%m/%Y").date()
             
-            # Filtro interno do Python: se vier dado a mais (por causa do Plano B ou C), o Python descarta o excesso.
             for item in dados:
                 data_item = datetime.strptime(item['data'], "%d/%m/%Y").date()
                 if data_ini <= data_item <= data_calc_obj:
@@ -85,7 +83,7 @@ def obter_taxa_bcb_em_cache(codigo_sgs: int, mes_ini: int, ano_ini: int, data_ca
     return 0.0
 
 # ==========================================
-# 1. MOTOR DE CÁLCULO (LINHA DO TEMPO + TETO SELIC UNIVERSAL)
+# 1. MOTOR DE CÁLCULO
 # ==========================================
 class SistemaRefisGuarabira:
     def __init__(self, valor_ufr_pb: float):
@@ -105,7 +103,7 @@ class SistemaRefisGuarabira:
         data_calculo_str = data_calculo.strftime("%d/%m/%Y")
         return obter_taxa_bcb_em_cache(codigo_sgs, mes_ini, ano_ini, data_calculo_str)
 
-    def processar_calculo_consolidado(self, lista_debitos, data_calculo: date, contribuinte="", cnpj="", mostrar_comparativo=False):
+    def processar_calculo_consolidado(self, lista_debitos, data_calculo: date, modalidade_escolhida: str, contribuinte="", cnpj="", mostrar_comparativo=False):
         total_orig = 0.0
         total_corr = 0.0
         total_multa = 0.0
@@ -131,13 +129,9 @@ class SistemaRefisGuarabira:
             texto_comparativo = ""
             texto_juros = ""
 
-            # Calcula o Teto Federal (Selic)
             fator_selic = self._obter_taxa_acumulada_bcb(4390, dt_venc, data_calculo)
             encargos_selic = val_orig * fator_selic
 
-            # ==========================================
-            # REGRA 1: ATÉ 2023 (CTM ANTIGO)
-            # ==========================================
             if ano_venc <= 2023:
                 fator_igpm = self._obter_taxa_acumulada_bcb(189, dt_venc, data_calculo)
                 val_corr_mun = val_orig * fator_igpm
@@ -146,10 +140,6 @@ class SistemaRefisGuarabira:
                 encargos_mun = val_corr_mun + juros_mun
                 nome_regra = "CTM Antigo: IGP-M + Juros"
                 nome_indice = "IGP-M"
-                
-            # ==========================================
-            # REGRA 2: A PARTIR DE 2024 (NOVA METODOLOGIA)
-            # ==========================================
             else:
                 fator_ipca = self._obter_taxa_acumulada_bcb(433, dt_venc, data_calculo)
                 val_corr_mun = val_orig * fator_ipca
@@ -162,9 +152,6 @@ class SistemaRefisGuarabira:
                 nome_regra = "Atual: IPCA + Juros"
                 nome_indice = "IPCA"
 
-            # ==========================================
-            # TRAVA DA SELIC E DISCRIMINAÇÃO DOS JUROS
-            # ==========================================
             if encargos_mun <= encargos_selic:
                 status_trava = f"(Regra {nome_regra})"
                 val_correcao = val_corr_mun
@@ -188,16 +175,13 @@ class SistemaRefisGuarabira:
                         f"   >> Soma Mun: R$ {encargos_mun:.2f} (Superou a Selic: R$ {encargos_selic:.2f})\n"
                     )
 
-            # Soma da linha
             total_deb = val_orig + val_correcao + val_multa + val_juros
 
-            # Consolidação
             total_orig += val_orig
             total_corr += val_correcao
             total_multa += val_multa
             total_juros += val_juros
             
-            # Impressão na Memória
             detalhamento_txt += f"--- {desc} (Venc: {dt_venc.strftime('%d/%m/%Y')}) ---\n"
             detalhamento_txt += f"Valor Original: R$ {val_orig:.2f}\n"
             if texto_comparativo:
@@ -213,33 +197,50 @@ class SistemaRefisGuarabira:
             raise ValueError("Nenhum débito válido para cálculo inserido.")
 
         # ==========================================
-        # OPÇÕES DE PARCELAMENTO (REFIS 2026)
+        # OPÇÕES DE PARCELAMENTO (DINÂMICO)
         # ==========================================
-        max_parcelas = 6 if total_geral <= 10000.00 else 10
         opcoes = []
         opcoes_memoria = ""
+        
+        # ROTA 1: CÁLCULO ORDINÁRIO (CTM)
+        if modalidade_escolhida == "Ordinário":
+            max_parcelas = 24
+            for p in range(1, max_parcelas + 1):
+                valor_parcela = total_geral / p
+                
+                if valor_parcela >= self.valor_ufr_pb:
+                    texto_p = "À Vista" if p == 1 else f"{p}x"
+                    opcoes.append({
+                        "Parcelas": texto_p,
+                        "Valor Parcela (R$)": round(valor_parcela, 2),
+                        "Total a Pagar (R$)": round(total_geral, 2),
+                        "Descontos": "Sem descontos aplicáveis"
+                    })
+                    opcoes_memoria += f"[{texto_p}] Parcela: R$ {valor_parcela:.2f} | Total: R$ {total_geral:.2f}\n"
+        
+        # ROTA 2: CÁLCULO REFIS (ANISTIA)
+        elif modalidade_escolhida == "REFIS":
+            max_parcelas = 6 if total_geral <= 10000.00 else 10
+            for p in range(1, max_parcelas + 1):
+                if p == 1: desc_j, desc_m = 1.00, 0.90
+                elif 2 <= p <= 6: desc_j, desc_m = 0.80, 0.80
+                else: desc_j, desc_m = 0.40, 0.40
 
-        for p in range(1, max_parcelas + 1):
-            if p == 1: desc_j, desc_m = 1.00, 0.90
-            elif 2 <= p <= 6: desc_j, desc_m = 0.80, 0.80
-            else: desc_j, desc_m = 0.40, 0.40
+                j_desc = total_juros * (1 - desc_j)
+                m_desc = total_multa * (1 - desc_m)
+                total_pagar = (total_orig + total_corr) + j_desc + m_desc
+                val_parcela = total_pagar / p
 
-            j_desc = total_juros * (1 - desc_j)
-            m_desc = total_multa * (1 - desc_m)
-            total_pagar = (total_orig + total_corr) + j_desc + m_desc
-            val_parcela = total_pagar / p
+                if val_parcela >= self.valor_ufr_pb:
+                    texto_p = "À Vista" if p == 1 else f"{p}x"
+                    opcoes.append({
+                        "Parcelas": texto_p,
+                        "Valor Parcela (R$)": round(val_parcela, 2),
+                        "Total a Pagar (R$)": round(total_pagar, 2),
+                        "Descontos": f"{(desc_j*100):.0f}% Juros | {(desc_m*100):.0f}% Multa"
+                    })
+                    opcoes_memoria += f"[{texto_p}] Parcela: R$ {val_parcela:.2f} | Total: R$ {total_pagar:.2f} | Descontos: {(desc_j*100):.0f}% Juros e {(desc_m*100):.0f}% Multa\n"
 
-            if val_parcela >= self.valor_ufr_pb:
-                modalidade = "À Vista" if p == 1 else f"{p}x"
-                opcoes.append({
-                    "Parcelas": modalidade,
-                    "Valor Parcela (R$)": round(val_parcela, 2),
-                    "Total a Pagar (R$)": round(total_pagar, 2),
-                    "Descontos": f"{(desc_j*100):.0f}% Juros | {(desc_m*100):.0f}% Multa"
-                })
-                opcoes_memoria += f"[{modalidade}] Parcela: R$ {val_parcela:.2f} | Total: R$ {total_pagar:.2f} | Descontos: {(desc_j*100):.0f}% Juros e {(desc_m*100):.0f}% Multa\n"
-
-        # Cabeçalho do Contribuinte
         cabecalho_contribuinte = ""
         if contribuinte or cnpj:
             cabecalho_contribuinte += "=========================================================\n"
@@ -248,7 +249,8 @@ class SistemaRefisGuarabira:
 
         memoria_txt = f"""=========================================================
 PREFEITURA MUNICIPAL DE GUARABIRA
-MEMÓRIA DE CÁLCULO CONSOLIDADA - REFIS 2026
+MEMÓRIA DE CÁLCULO CONSOLIDADA
+MODALIDADE: {modalidade_escolhida.upper()}
 =========================================================
 DATA DO ACORDO: {data_calculo.strftime('%d/%m/%Y')}
 {cabecalho_contribuinte}=========================================================
@@ -264,7 +266,7 @@ DATA DO ACORDO: {data_calculo.strftime('%d/%m/%Y')}
 -> DÍVIDA TOTAL SEM DESCONTO: R$ {total_geral:.2f}
 
 =========================================================
-3. OPÇÕES DE ENQUADRAMENTO - REFIS 2026
+3. OPÇÕES DE PARCELAMENTO ({modalidade_escolhida.upper()})
 =========================================================
 {opcoes_memoria}
 """
@@ -307,17 +309,39 @@ def gerar_pdf(texto_memoria, nome_servidor, matricula):
 # ==========================================
 # 4. INTERFACE VISUAL (STREAMLIT)
 # ==========================================
-st.set_page_config(page_title="REFIS 2026 - Guarabira", layout="wide")
+st.set_page_config(page_title="Gestão de Débitos - Guarabira", layout="wide")
 
-st.title("🏛️ Simulador REFIS 2026 - Guarabira")
+try:
+    st.image("brasao_guarabira.jpg", width=100)
+except:
+    pass
+
+st.title("🏛️ Simulador de Débitos Tributários - Guarabira")
 st.markdown("Cálculo consolidado com adequação automática ao **Código Tributário** e ao **Teto Selic Universal (STF Tema 1.217)**.")
 
 with st.sidebar:
-    st.image("brasao_guarabira.jpg", use_container_width=True)
-    st.header("⚙️ Configurações e Emissor")
+    try:
+        st.image("brasao_guarabira.jpg", use_container_width=True)
+    except:
+        pass
+    
+    st.header("⚙️ Configurações do Cálculo")
+    
+    if not REFIS_ATIVO:
+        modalidade = "Ordinário"
+        st.info("ℹ️ O programa REFIS encontra-se inativo. Os cálculos seguirão o regime ordinário de parcelamento em até 24x (Art. 56, CTM).")
+    else:
+        modalidade = st.radio(
+            "Selecione a Modalidade de Cobrança:",
+            options=["REFIS", "Ordinário"],
+            help="O modo Ordinário calcula em até 24x sem desconto. O modo REFIS aplica a anistia e limita em até 6x ou 10x."
+        )
+
+    st.divider()
+    st.header("👤 Emissor")
     matricula_input = st.text_input("Matrícula do Servidor (Obrigatório)")
     dt_calc = st.date_input("Data do Acordo (Hoje)", date.today(), format="DD/MM/YYYY")
-    ufr_pb = st.number_input("Valor UFR-PB Atual (R$)", value=74.13)
+    ufr_pb = st.number_input("Valor UFR-PB Atual (R$)", value=65.00)
 
 st.subheader("👤 Dados do Contribuinte (Opcional)")
 col_nome, col_doc = st.columns(2)
@@ -358,7 +382,7 @@ df_editado = st.data_editor(
 
 st.write("")
 mostrar_comparativo = st.checkbox("🔍 Exibir comparativo detalhado (CTM vs STF) no relatório quando a regra municipal for descartada", value=False)
-btn_calcular = st.button("Gerar Cálculo Oficial Consolidado", use_container_width=True, type="primary")
+btn_calcular = st.button(f"Gerar Cálculo Oficial ({modalidade})", use_container_width=True, type="primary")
 
 if btn_calcular:
     if not matricula_input:
@@ -393,10 +417,10 @@ if btn_calcular:
             else:
                 try:
                     motor = SistemaRefisGuarabira(valor_ufr_pb=ufr_pb)
-                    with st.spinner('Auditando CTM vs Teto STF Universal...'):
-                        resultado = motor.processar_calculo_consolidado(lista_debitos, dt_calc, input_nome, input_doc, mostrar_comparativo)
+                    with st.spinner(f'Auditando CTM vs Teto STF Universal e gerando parcelamento ({modalidade})...'):
+                        resultado = motor.processar_calculo_consolidado(lista_debitos, dt_calc, modalidade, input_nome, input_doc, mostrar_comparativo)
                     
-                    st.subheader("💳 2. Opções de Parcelamento (REFIS 2026)")
+                    st.subheader(f"💳 2. Opções de Parcelamento ({modalidade})")
                     if resultado['opcoes']:
                         df_resumo = pd.DataFrame(resultado['opcoes'])
                         st.dataframe(df_resumo, use_container_width=True, hide_index=True)
@@ -415,7 +439,7 @@ if btn_calcular:
                         st.download_button(
                             label="⬇️ Baixar Documento Oficial em PDF",
                             data=pdf_bytes,
-                            file_name=f"Termo_Consolidado_Refis_{dt_calc.strftime('%Y%m%d')}.pdf",
+                            file_name=f"Termo_{modalidade}_Guarabira_{dt_calc.strftime('%Y%m%d')}.pdf",
                             mime="application/pdf",
                             type="primary"
                         )
